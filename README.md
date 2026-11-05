@@ -1,5 +1,6 @@
 # Laboratorio de Datos
-nDirección: https://andinoworks.github.io/Fisica-Experimental/
+
+Dirección: https://andinoworks.github.io/Fisica-Experimental/
 
 Análisis de datos para Física Experimental II (FaMAF, UNC). Es una página estática: no necesita servidor ni instalación, y los cálculos se hacen en el dispositivo de quien la usa.
 

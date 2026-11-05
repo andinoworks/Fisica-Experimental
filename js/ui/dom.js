@@ -139,7 +139,8 @@ export function plainText(root) {
   copy.querySelectorAll('.plot, .copy-row, details:not([open]) > :not(summary)').forEach((node) => node.remove());
   copy.querySelectorAll('.katex').forEach((node) => {
     const source = node.querySelector('annotation');
-    node.replaceWith(source ? source.textContent : node.textContent);
+    node.replaceWith(source ? source.textContent.replace('\\displaystyle ', '') : node.textContent);
+    node.remove();
   });
   copy.style.position = 'absolute';
   copy.style.left = '-9999px';

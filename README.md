@@ -19,6 +19,12 @@ Análisis de datos para Física Experimental II (FaMAF, UNC). Es una página est
 | Graficar funciones | `graficar_funciones.py` | Funciones, derivadas y puntos con barras de error |
 | Distribuciones y tablas | Apéndices y 9/15, cap. 5 | t y F críticos, normal, binomial, Poisson, ν tipo B |
 
+## Procedimiento, teórico y sesiones
+
+- Cada herramienta muestra el procedimiento paso a paso: fórmula general, valores reemplazados y resultado.
+- "Teórico y tablas" resume las fórmulas de los apuntes e incluye las tablas t, F y normal.
+- Las sesiones guardan los datos de todas las herramientas en el navegador. Con "Exportar" e "Importar" se pasan a otro dispositivo en un archivo `.json`.
+
 ## Probarla en la computadora
 
 Hace falta un servidor local porque usa módulos de JavaScript:
@@ -40,6 +46,7 @@ En GitHub: Settings → Pages → Deploy from a branch → `main` y carpeta `/ (
 ## Estructura
 
 - `js/core/`: cálculo, sin interfaz (`stats`, `fit`, `symbolic`, `parse`, `format`).
+- `js/sesiones.js`: guardado de sesiones. `js/teorico.js`: página de teórico y tablas.
 - `js/tools/`: una herramienta por archivo.
 - `js/ui/`: formularios, resultados y gráficos.
 - `vendor/`: librerías incluidas; ver `vendor/LICENSES.md`.

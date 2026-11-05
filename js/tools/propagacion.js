@@ -7,6 +7,7 @@ import { parseNumbers, parseNu, parseScalar } from '../core/parse.js';
 import { covariance, summarize } from '../core/stats.js';
 import { compileFormula, propagate, propagatePaired, symbolTex } from '../core/symbolic.js';
 import { confidenceOf, percentOf } from './comunes.js';
+import { b as br, combinedSteps, expandedStep, n as num, procedure, welchStep } from '../ui/procedimiento.js';
 
 const emptyVariable = () => ({ mode: 'direct', value: '', u: '', nu: '', data: '', ub: '' });
 const pairKey = (a, b) => `${a}|${b}`;
@@ -30,7 +31,7 @@ function readVariable(name, v) {
     const u = Math.hypot(r.sem, ub);
     // Tipo A con ν = N-1 más tipo B con ν infinito: Welch-Satterthwaite (6.9).
     const nu = ub > 0 ? r.nu * (u / r.sem) ** 4 : r.nu;
-    return { name, value: r.mean, u, nu, values, n: r.n };
+    return { name, value: r.mean, u, nu, values, n: r.n, s: r.s, sem: r.sem, ub };
   }
   const value = parseScalar(v.value);
   if (value === null) return null;
@@ -189,7 +190,7 @@ export default {
       const y = byName[b];
       if (!x.values || !y.values) throw new Error(`Para calcular la covarianza de ${a} y ${b}, ambas tienen que cargarse como serie de datos.`);
       if (x.n !== y.n) throw new Error(`${a} tiene ${x.n} mediciones y ${b} tiene ${y.n}: para medirlas de a pares tienen que coincidir.`);
-      covariances.push({ a, b, value: covariance(x.values, y.values) / x.n });
+      covariances.push({ a, b, value: covariance(x.values, y.values) / x.n, sxy: covariance(x.values, y.values), n: x.n });
       pairedWith.add(a).add(b);
     }));
 
@@ -231,10 +232,53 @@ export default {
       nodes.push(note('warn', `No hay derivada simbólica para ${numericNames.join(', ')}: se calculó numéricamente.`));
     }
 
-    nodes.push(card('Derivadas parciales', h('div', { class: 'math-list' },
-      tex(`${outputTex} = ${compiled.tex}`),
-      r.rows.filter((row_) => row_.derivative.symbolic).map((row_) => tex(
-        `c_{${symbolTex(row_.name)}} = \\dfrac{\\partial ${outputTex}}{\\partial ${symbolTex(row_.name)}} = ${row_.derivative.tex}`)))));
+    const inputMath = inputs.map((input) => {
+      const name = symbolTex(input.name);
+      if (input.values) {
+        const lines = [
+          `\\bar{${name}} = ${num(input.value)}, \\quad s = ${num(input.s)}, \\quad N = ${input.n}`,
+          `s_{\\bar{${name}}} = \\dfrac{s}{\\sqrt{N}} = \\dfrac{${num(input.s)}}{\\sqrt{${input.n}}} = ${num(input.sem)}`,
+        ];
+        if (input.ub > 0) {
+          lines.push(`u(${name}) = \\sqrt{s_{\\bar{${name}}}^{2} + u_B^{2}} = \\sqrt{${br(input.sem)}^{2} + ${br(input.ub)}^{2}} = ${num(input.u)}`);
+          lines.push(`\\nu_{${name}} = (N-1) \\left(\\dfrac{u}{s_{\\bar{${name}}}}\\right)^{4} = ${num(input.nu)}`);
+        } else {
+          lines.push(`u(${name}) = ${num(input.u)}, \\quad \\nu_{${name}} = N - 1 = ${num(input.nu)}`);
+        }
+        return lines;
+      }
+      if (input.u === 0) return [`${name} = ${num(input.value)} \\ \\text{(sin incertidumbre)}`];
+      return [`${name} = ${num(input.value)}, \\quad u(${name}) = ${num(input.u)}, \\quad \\nu_{${name}} = ${num(input.nu)}`];
+    }).flat();
+
+    const covarianceStep = covariances.length > 0 && {
+      title: 'Covarianzas',
+      math: covariances.map(({ a, b, value, sxy, n: count }) => {
+        const pair = `u(${symbolTex(a)},${symbolTex(b)})`;
+        if (sxy === undefined) return `${pair} = ${num(value)} \\ \\text{(ingresada)}`;
+        return `${pair} = \\dfrac{1}{N} \\cdot \\dfrac{\\sum (x_k - \\bar{x})(y_k - \\bar{y})}{N - 1} = \\dfrac{${num(sxy)}}{${count}} = ${num(value)}`;
+      }),
+    };
+
+    const pairedSteps = paired && [{
+      title: 'Otra forma: calcular en cada juego de mediciones (ec. 6.3)',
+      text: `Evalúa la fórmula en cada uno de los ${paired.values.length} juegos y promedia. No necesita covarianzas ni Welch-Satterthwaite.`,
+      math: [
+        `${outputTex}_k = ${paired.values.slice(0, 6).map((value) => num(value)).join(',\\ ')}${paired.values.length > 6 ? ',\\ \\dots' : ''}`,
+        `\\bar{${outputTex}} = ${num(paired.y)}, \\quad s = ${num(paired.s)}`,
+        `u = \\dfrac{s}{\\sqrt{N}} = \\dfrac{${num(paired.s)}}{\\sqrt{${paired.values.length}}} = ${num(paired.u)}, \\quad \\nu = N - 1 = ${paired.nu}`,
+        `U = k\\, u = ${num(paired.k)} \\cdot ${num(paired.u)} = ${num(paired.U)}`,
+      ],
+    }];
+
+    nodes.push(procedure([
+      { title: 'Datos de entrada', math: inputMath },
+      covarianceStep,
+      ...combinedSteps(compiled, r),
+      welchStep(r),
+      r.uc > 0 && expandedStep(r.k, r.uc, confidence, r.nuEff),
+      ...(pairedSteps ?? []),
+    ]));
 
     nodes.push(card('Presupuesto de incertidumbre',
       table(['Variable', 'Valor', 'u', 'ν', 'c', '|c·u|', 'Aporte a Σ(c·u)²'], r.rows.map((row_) => [
@@ -243,37 +287,12 @@ export default {
       ]))));
 
     if (r.crossRows.length) {
-      nodes.push(card('Términos de covarianza',
-        table(['Par', 'Cov', '2·c·c·Cov'], r.crossRows.map((row_) => [
-          tex(`${symbolTex(row_.a)},\\ ${symbolTex(row_.b)}`), fmt(row_.value), fmt(row_.term),
-        ])),
-        h('div', { style: 'height:8px' }),
-        keyValues([
-          ['Sin correlación, u sería', fmt(Math.sqrt(r.independent))],
-          ['Con correlación, u_c es', fmt(r.uc)],
-        ])));
+      nodes.push(card('Efecto de la correlación', keyValues([
+        ['Sin correlación, u sería', fmt(Math.sqrt(r.independent))],
+        ['Con correlación, u_c es', fmt(r.uc)],
+      ])));
     }
 
-    nodes.push(card('Cálculo', keyValues([
-      [`Valor de ${compiled.output ?? 'la fórmula'}`, fmt(r.y)],
-      ['Incertidumbre combinada u_c', fmt(r.uc)],
-      ['ν efectivo sin truncar', fmt(r.nuRaw)],
-      ['ν efectivo', r.nuEff === Infinity ? '∞' : fmtInt(r.nuEff)],
-      [`k para ${percentOf(confidence)}`, fmt(r.k)],
-      ['Incertidumbre expandida U = k·u_c', fmt(r.U)],
-    ])));
-
-    if (paired) {
-      nodes.push(card('Detalle de la ec. 6.3',
-        h('p', { class: 'help' }, `Evalúa la fórmula en cada juego de ${paired.values.length} mediciones y promedia. No necesita covarianzas ni Welch-Satterthwaite, y el apunte la menciona como preferible para fórmulas no lineales.`),
-        keyValues([
-          ['Valor medio', fmt(paired.y)],
-          ['Incertidumbre estándar s/√N', fmt(paired.u)],
-          ['Grados de libertad ν = N−1', fmtInt(paired.nu)],
-          ['k', fmt(paired.k)],
-          ['Incertidumbre expandida U', fmt(paired.U)],
-        ])));
-    }
     return nodes;
   },
 };

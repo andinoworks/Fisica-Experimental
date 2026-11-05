@@ -12,25 +12,39 @@ import { lineal, ponderado, polinomial } from './tools/ajustes.js';
 import linealizar from './tools/linealizar.js';
 import graficar from './tools/graficar.js';
 import distribuciones from './tools/distribuciones.js';
+import { mountTheory } from './teorico.js';
+import { createSessions } from './sesiones.js';
 
 const TOOLS = [propagacion, lineal, ponderado, polinomial, linealizar, muestra, testF, comparar, graficar, distribuciones];
 const GROUPS = ['Incertidumbres', 'Ajustes', 'Muestras y comparación', 'Gráficos y tablas'];
 
-const STORAGE_PREFIX = 'labdatos:';
+const FORMAT_KEY = 'labdatos:formato';
+const TOOL_DEFAULTS = Object.fromEntries(TOOLS.map((tool) => [tool.id, tool.defaults]));
 
-function load(key) {
+let sessions;
+
+function browserStorage() {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_PREFIX + key)) ?? null;
+    return window.localStorage;
+  } catch {
+    // Algunos navegadores bloquean el acceso: safeStorage cae a memoria.
+    return { getItem() { throw new Error(); }, setItem() { throw new Error(); }, removeItem() { throw new Error(); } };
+  }
+}
+
+function loadFormat() {
+  try {
+    return JSON.parse(localStorage.getItem(FORMAT_KEY));
   } catch {
     return null;
   }
 }
 
-function save(key, value) {
+function saveFormat(value) {
   try {
-    localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(value));
+    localStorage.setItem(FORMAT_KEY, JSON.stringify(value));
   } catch {
-    // Sin almacenamiento la página funciona igual; solo no recuerda los datos.
+    // Sin almacenamiento se usa el formato por defecto la próxima vez.
   }
 }
 
@@ -39,7 +53,7 @@ const clone = (value) => JSON.parse(JSON.stringify(value));
 // ---------- Herramientas ----------
 
 function mountTool(tool, main) {
-  let state = { ...clone(tool.defaults), ...(load(tool.id) ?? {}) };
+  let state = { ...clone(tool.defaults), ...(sessions.getTool(tool.id) ?? {}) };
   let timer = null;
   let hooks = [];
   let form;
@@ -83,7 +97,8 @@ function mountTool(tool, main) {
   function notify() {
     form.refresh();
     hooks.forEach((hook) => hook());
-    save(tool.id, state);
+    sessions.setTool(tool.id, state);
+    refreshSaveStatus();
     clearTimeout(timer);
     timer = setTimeout(compute, 220);
   }
@@ -105,7 +120,8 @@ function mountTool(tool, main) {
 
   const replaceState = (next) => {
     state = { ...clone(tool.defaults), ...clone(next) };
-    save(tool.id, state);
+    sessions.setTool(tool.id, state);
+    refreshSaveStatus();
     rebuild();
   };
 
@@ -166,7 +182,7 @@ function mountHome(main) {
         output,
         h('p', { style: 'margin-top:10px' }, h('a', {
           href: '#/propagacion',
-          onClick: () => save('propagacion', { ...(load('propagacion') ?? {}), formula: input.value }),
+          onClick: () => sessions.setTool('propagacion', { ...(sessions.getTool('propagacion') ?? {}), formula: input.value }),
         }, 'Calcular la incertidumbre de esta fórmula')))),
     h('section', {},
       h('h2', {}, 'Herramientas'),
@@ -182,8 +198,11 @@ function mountHome(main) {
         h('tbody', {}, LABS.map(([lab, a, la, b, lb]) => h('tr', {},
           h('td', {}, lab), h('td', {}, a), h('td', {}, links(la)), h('td', {}, b), h('td', {}, links(lb)))))))),
     h('section', {},
+      h('h2', {}, 'Sesiones'),
+      h('p', { style: 'max-width:74ch' }, 'Creá una sesión por experimento, por ejemplo "Lab 3 Clément". Todo lo que cargues se guarda solo en la sesión activa, y podés cambiar de una a otra sin perder datos. Las sesiones quedan en este navegador: para llevarlas a otro dispositivo o tener una copia, usá "Exportar".')),
+    h('section', {},
       h('h2', {}, 'Cómo cargar los datos'),
-      h('p', { style: 'max-width:74ch' }, 'Pegá las columnas desde Excel o Python: sirven espacios, tabulaciones, saltos de línea, punto y coma, coma decimal o punto decimal. Lo que cargás queda guardado solo en este navegador, y los cálculos se hacen en tu dispositivo: no se envía nada a ningún servidor.')),
+      h('p', { style: 'max-width:74ch' }, 'Pegá las columnas desde Excel o Python: sirven espacios, tabulaciones, saltos de línea, punto y coma, coma decimal o punto decimal. Los cálculos se hacen en tu dispositivo: no se envía nada a ningún servidor.')),
   ));
   refresh();
   document.title = 'Laboratorio de Datos';
@@ -191,9 +210,163 @@ function mountHome(main) {
 
 // ---------- Navegación ----------
 
-function buildNav(onFormatChange) {
+// ---------- Sesiones ----------
+
+let refreshSaveStatus = () => {};
+
+function downloadText(text, filename) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  const link = h('a', { href: url, download: filename });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function buildSessionPanel(onSwitch) {
+  const select = h('select', { id: 'sesion-actual', 'aria-label': 'Sesión actual' });
+  const status = h('p', { class: 'session-status', role: 'status' });
+  const chip = document.querySelector('.session-chip');
+  let deleteTimer = null;
+
+  const nameInput = h('input', { type: 'text', maxLength: 60, 'aria-label': 'Nombre de la sesión', autocomplete: 'off' });
+  let nameAction = null;
+  const nameForm = h('form', {
+    class: 'session-name',
+    hidden: true,
+    onSubmit: (event) => {
+      event.preventDefault();
+      const name = nameInput.value.trim();
+      if (!name) return;
+      const action = nameAction;
+      nameForm.hidden = true;
+      action(name);
+    },
+  }, nameInput, h('div', { class: 'session-buttons' },
+    h('button', { type: 'submit' }, 'Guardar'),
+    h('button', { type: 'button', class: 'quiet', onClick: () => { nameForm.hidden = true; } }, 'Cancelar')));
+
+  function askName(initial, action) {
+    nameAction = action;
+    nameInput.value = initial;
+    nameForm.hidden = false;
+    nameInput.focus();
+    nameInput.select();
+  }
+
+  function say(text, isError = false) {
+    status.textContent = text;
+    status.classList.toggle('bad', isError);
+  }
+
+  const idleStatus = () => (sessions.saveFailed
+    ? 'Este navegador no deja guardar: exportá la sesión para no perder los datos.'
+    : 'Se guarda sola en este navegador.');
+
+  refreshSaveStatus = () => {
+    if (sessions.saveFailed) say(idleStatus(), true);
+  };
+
+  function refresh() {
+    select.replaceChildren(...sessions.list().map((entry) => h('option', { value: entry.id }, entry.name)));
+    select.value = sessions.activeId;
+    if (chip) chip.textContent = sessions.activeName;
+    say(idleStatus(), sessions.saveFailed);
+  }
+
+  const changed = () => {
+    refresh();
+    onSwitch();
+  };
+
+  select.addEventListener('change', () => {
+    sessions.switchTo(select.value);
+    changed();
+  });
+
+  const deleteButton = h('button', {
+    type: 'button',
+    class: 'quiet',
+    onClick: () => {
+      if (!deleteTimer) {
+        deleteButton.textContent = '¿Seguro? Eliminar';
+        deleteTimer = setTimeout(() => {
+          deleteTimer = null;
+          deleteButton.textContent = 'Eliminar';
+        }, 4000);
+        return;
+      }
+      clearTimeout(deleteTimer);
+      deleteTimer = null;
+      deleteButton.textContent = 'Eliminar';
+      const name = sessions.activeName;
+      sessions.remove(sessions.activeId);
+      changed();
+      say(`Se eliminó "${name}".`);
+    },
+  }, 'Eliminar');
+
+  const fileInput = h('input', {
+    type: 'file',
+    accept: '.json,application/json',
+    hidden: true,
+    onChange: async (event) => {
+      const [file] = event.target.files;
+      event.target.value = '';
+      if (!file) return;
+      try {
+        const entry = sessions.importText(await file.text());
+        changed();
+        say(`Se importó "${entry.name}".`);
+      } catch (error) {
+        say(error.message, true);
+      }
+    },
+  });
+
+  refresh();
+
+  return h('section', { class: 'session-panel' },
+    h('label', { class: 'field-label', htmlFor: 'sesion-actual' }, 'Sesión'),
+    select,
+    h('div', { class: 'session-buttons' },
+      h('button', {
+        type: 'button',
+        onClick: () => askName('', (name) => {
+          sessions.create(name);
+          changed();
+        }),
+      }, 'Nueva'),
+      h('button', {
+        type: 'button',
+        class: 'quiet',
+        onClick: () => askName(sessions.activeName, (name) => {
+          sessions.rename(sessions.activeId, name);
+          refresh();
+        }),
+      }, 'Renombrar'),
+      deleteButton),
+    nameForm,
+    status,
+    h('details', { class: 'session-more' },
+      h('summary', {}, 'Pasar a otro dispositivo'),
+      h('p', {}, 'Exportá la sesión a un archivo y abrilo con "Importar" en el otro dispositivo.'),
+      h('div', { class: 'session-buttons' },
+        h('button', {
+          type: 'button',
+          class: 'quiet',
+          onClick: () => {
+            const name = sessions.activeName.replace(/[^\p{L}\p{N} _-]+/gu, '').trim() || 'sesion';
+            downloadText(sessions.exportText(), `${name}.json`);
+          },
+        }, 'Exportar'),
+        h('button', { type: 'button', class: 'quiet', onClick: () => fileInput.click() }, 'Importar'),
+        fileInput)));
+}
+
+function buildNav(onFormatChange, onSessionChange) {
   const nav = document.getElementById('nav');
-  const saved = load('formato');
+  const saved = loadFormat();
   if (saved) Object.assign(numberFormat, saved);
   const settings = { mode: numberFormat.mode, digits: String(numberFormat.digits), comma: numberFormat.comma, sig: String(numberFormat.sig) };
   const applyFormat = () => {
@@ -202,13 +375,14 @@ function buildNav(onFormatChange) {
     numberFormat.digits = Number.isInteger(digits) && digits >= 0 && digits <= 15 ? digits : 5;
     numberFormat.comma = settings.comma;
     numberFormat.sig = Number(settings.sig);
-    save('formato', { ...numberFormat });
+    saveFormat({ ...numberFormat });
     onFormatChange();
   };
   const f = createForm(settings, applyFormat);
 
   nav.replaceChildren(
     h('a', { class: 'nav-brand', href: '#/' }, 'Laboratorio de Datos', h('small', {}, 'Física Experimental II')),
+    buildSessionPanel(onSessionChange),
     ...GROUPS.map((name) => h('ul', { class: 'nav-group' },
       h('li', { class: 'nav-group-title' }, name),
       TOOLS.filter((tool) => tool.group === name).map((tool) => h('li', {}, h('a', { href: `#/${tool.id}`, 'data-tool': tool.id }, tool.title))))),
@@ -218,6 +392,9 @@ function buildNav(onFormatChange) {
       f.text('digits', { label: 'Cifras', decimal: true }),
       f.select('sig', { label: 'Cifras de la incertidumbre en el informe', options: [['1', '1 cifra'], ['2', '2 cifras']] }),
       f.check('comma', { label: 'Mostrar con coma decimal' })),
+    h('ul', { class: 'nav-group' },
+      h('li', { class: 'nav-group-title' }, 'Consulta'),
+      h('li', {}, h('a', { href: '#/teorico', 'data-tool': 'teorico' }, 'Teórico y tablas'))),
   );
 }
 
@@ -226,6 +403,7 @@ function route() {
   const id = location.hash.replace(/^#\/?/, '');
   const tool = TOOLS.find((candidate) => candidate.id === id);
   if (tool) mountTool(tool, main);
+  else if (id === 'teorico') mountTheory(main);
   else mountHome(main);
 
   document.querySelectorAll('.nav-group a').forEach((link) => {
@@ -240,7 +418,8 @@ function route() {
 
 window.addEventListener('DOMContentLoaded', () => {
   let current = null;
-  buildNav(() => current?.onRecompute?.());
+  sessions = createSessions(browserStorage(), TOOL_DEFAULTS);
+  buildNav(() => current?.onRecompute?.(), () => { current = route(); });
   document.querySelector('.menu-button').addEventListener('click', (event) => {
     const open = document.getElementById('nav').classList.toggle('open');
     event.currentTarget.setAttribute('aria-expanded', String(open));

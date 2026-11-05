@@ -70,6 +70,7 @@ export function fitPolynomial(x, y, { degree = 1, sigma = null } = {}) {
   return {
     coef,
     cov,
+    alphaInverse,
     u: cov.map((row, k) => Math.sqrt(row[k])),
     N,
     nu,
@@ -96,6 +97,66 @@ export function fitPolynomial(x, y, { degree = 1, sigma = null } = {}) {
       return coef.reduceRight((acc, c, k) => (k === 0 ? acc : acc * x0 + k * c), 0);
     },
   };
+}
+
+// Sumas de la recta con las fórmulas explícitas del apunte (4/11, ec. 4.5 a 4.14 y 4.25 a 4.27).
+// Se muestran en el procedimiento; las pruebas verifican que coinciden con el ajuste.
+export function linearDetails(x, y, sigma = null) {
+  const N = x.length;
+  const add = (fn) => x.reduce((sum, xi, i) => sum + fn(xi, y[i], i), 0);
+
+  if (!sigma) {
+    const sumX = add((xi) => xi);
+    const sumY = add((_, yi) => yi);
+    const sumX2 = add((xi) => xi * xi);
+    const xMean = sumX / N;
+    const yMean = sumY / N;
+    const Sxx = add((xi) => (xi - xMean) ** 2);
+    const Sxy = add((xi, yi) => (xi - xMean) * (yi - yMean));
+    const Syy = add((_, yi) => (yi - yMean) ** 2);
+    const a = Sxy / Sxx;
+    const b = yMean - a * xMean;
+    const sse = add((xi, yi) => (yi - (a * xi + b)) ** 2);
+    const s2 = sse / (N - 2);
+    const s = Math.sqrt(s2);
+    return {
+      N, sumX, sumY, sumX2, xMean, yMean, Sxx, Sxy, Syy, a, b, sse, s2, s,
+      ua: s / Math.sqrt(Sxx),
+      ub: s * Math.sqrt(sumX2 / (N * Sxx)),
+      r2: 1 - sse / Syy,
+    };
+  }
+
+  const w = sigma.map((value) => 1 / (value * value));
+  const S = add((_, __, i) => w[i]);
+  const Sx = add((xi, _, i) => w[i] * xi);
+  const Sy = add((_, yi, i) => w[i] * yi);
+  const Sxx = add((xi, _, i) => w[i] * xi * xi);
+  const Sxy = add((xi, yi, i) => w[i] * xi * yi);
+  const delta = S * Sxx - Sx * Sx;
+  const a = (S * Sxy - Sx * Sy) / delta;
+  const b = (Sxx * Sy - Sx * Sxy) / delta;
+  const sse = add((xi, yi, i) => w[i] * (yi - (a * xi + b)) ** 2);
+  const yMean = Sy / S;
+  const total = add((_, yi, i) => w[i] * (yi - yMean) ** 2);
+  return {
+    N, S, Sx, Sy, Sxx, Sxy, delta, a, b, sse,
+    s2: sse / (N - 2),
+    ua: Math.sqrt(S / delta),
+    ub: Math.sqrt(Sxx / delta),
+    r2: 1 - sse / total,
+  };
+}
+
+// Matriz α y vector β del ajuste polinomial (9/15, ec. 3.6 y 3.7).
+export function normalMatrices(x, y, sigma, degree) {
+  const size = degree + 1;
+  const weight = (i) => (sigma ? 1 / (sigma[i] * sigma[i]) : 1);
+  const alpha = Array.from({ length: size }, (_, k) => Array.from({ length: size }, (__, j) =>
+    x.reduce((sum, xi, i) => sum + weight(i) * xi ** (k + j), 0)));
+  const beta = Array.from({ length: size }, (_, k) =>
+    x.reduce((sum, xi, i) => sum + weight(i) * y[i] * xi ** k, 0));
+  return { alpha, beta };
 }
 
 // Ajuste ponderado que además propaga la incertidumbre de x hacia y (ec. 4.19):

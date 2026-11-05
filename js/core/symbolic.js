@@ -53,6 +53,16 @@ export function nodeToTex(node) {
   return node.toTex({ parenthesis: 'keep', implicit: 'hide', handler: texHandler });
 }
 
+// La misma expresión con los valores reemplazados. numberTex decide cómo se escribe cada número.
+export function nodeToTexWith(node, scope, numberTex) {
+  const handler = (n) => {
+    if (!n.isSymbolNode) return undefined;
+    if (n.name in scope) return `{${numberTex(scope[n.name])}}`;
+    return `{${symbolTex(n.name)}}`;
+  };
+  return node.toTex({ parenthesis: 'keep', implicit: 'show', handler });
+}
+
 function friendlyParseError(error, text) {
   const position = error.message.match(/char (\d+)/);
   const where = position ? ` (cerca del carácter ${position[1]})` : '';

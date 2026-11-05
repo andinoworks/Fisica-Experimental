@@ -1,15 +1,17 @@
 // Transformación de variables para linealizar y ajuste de la recta (Serie C 4/11, sección 4.6).
 // Las incertidumbres de las variables nuevas se propagan con derivadas automáticas (ec. 4.28).
 
-import { answer, card, group, h, keyValues, note, row, tex } from '../ui/dom.js';
+import { answer, card, group, h, keyValues, note, row, table } from '../ui/dom.js';
 import { fitChart } from '../ui/plot.js';
 import { fmt, fmtInt, fmtMeasurement } from '../core/format.js';
 import { parseScalar } from '../core/parse.js';
 import { coverage } from '../core/stats.js';
 import { fitPolynomial, fitWithXUncertainty } from '../core/fit.js';
-import { compileFormula, evaluate, partialDerivative, propagate, sensitivity } from '../core/symbolic.js';
+import { compileFormula, evaluate, nodeToTexWith, partialDerivative, propagate, sensitivity } from '../core/symbolic.js';
 import { confidenceOf, percentOf } from './comunes.js';
 import { dataFields, dataTable, equationText, predictionCard, readXY } from './ajustes.js';
+import { combinedSteps, n, procedure, p as par } from '../ui/procedimiento.js';
+import { linearSteps } from './pasos-ajuste.js';
 
 const PRESETS = {
   'ln-x': ['ln(y)', 'x', 'y = A·exp(m·x), como un enfriamiento'],
@@ -152,6 +154,7 @@ export default {
       nodes.push(note('warn', 'Sin incertidumbre de y se hizo un ajuste ordinario. El apunte recuerda que al transformar las σ dejan de ser iguales, así que conviene cargarla y ponderar.'));
     }
 
+    let derivedSteps = null;
     if (s.derived.trim()) {
       const derived = compileFormula(s.derived);
       const unknown = derived.variables.filter((name) => name !== 'm' && name !== 'b' && !(name in constants));
@@ -165,19 +168,16 @@ export default {
       const covariances = usesBoth ? [{ a: 'm', b: 'b', value: fit.cov[0][1] }] : [];
       const r = propagate(derived, inputs, covariances, confidence);
       const U = k * r.uc;
+      derivedSteps = [
+        ...combinedSteps(derived, r),
+        { title: 'Incertidumbre expandida', text: 'Se usa el k del ajuste.', math: [`U = k\\, u_c = ${n(k)} \\cdot ${n(r.uc)} = ${n(U)}`] },
+      ];
       nodes.push(answer([{
         label: `${derived.output ?? 'Magnitud derivada'} al ${percentOf(confidence)}`,
         value: fmtMeasurement(r.y, U, { unit: s.derivedUnit.trim() }),
         detail: `Valor ${fmt(r.y)}, u = ${fmt(r.uc)}, con ν = ${fmtInt(fit.nu)} del ajuste`,
       }]));
     }
-
-    nodes.push(card('Transformación', h('div', { class: 'math-list' },
-      tex(`Y = ${fy.tex}`),
-      tex(`X = ${fx.tex}`),
-      dYy.symbolic && tex(`\\dfrac{\\partial Y}{\\partial y} = ${dYy.tex}`),
-      dYx?.symbolic && tex(`\\dfrac{\\partial Y}{\\partial x} = ${dYx.tex}`),
-      dXx?.symbolic && tex(`\\dfrac{\\partial X}{\\partial x} = ${dXx.tex}`))));
 
     nodes.push(card(null, fitChart({
       x: X, y: Y, ex: sX, ey: sY,
@@ -186,7 +186,40 @@ export default {
       labelX: s.labelX.trim() || s.fx, labelY: s.labelY.trim() || s.fy, title: s.title.trim(), filename: 'linealizado',
     })));
 
-    nodes.push(card('Resultados del ajuste',
+    const firstScope = { ...constants, x: data.x[0], y: data.y[0] };
+    const number = (value) => par(value);
+    const sigmaTerms = [`\\left(\\dfrac{\\partial Y}{\\partial y}\\right)^{2} \\sigma_y^{2}`];
+    if (dYx) sigmaTerms.push(`\\left(\\dfrac{\\partial Y}{\\partial x}\\right)^{2} \\sigma_x^{2}`);
+    const firstY = sY[0];
+    const transformStep = {
+      title: 'Transformación de las variables',
+      text: `Reemplazando el primer punto (x = ${fmt(data.x[0])}, y = ${fmt(data.y[0])}):`,
+      math: [
+        `Y = ${fy.tex}, \\qquad X = ${fx.tex}`,
+        `Y_1 = ${nodeToTexWith(fy.node, firstScope, number)} = ${n(Y[0])}`,
+        `X_1 = ${nodeToTexWith(fx.node, firstScope, number)} = ${n(X[0])}`,
+      ],
+    };
+    const propagationStep = {
+      title: 'Propagación de las incertidumbres (ec. 4.28)',
+      math: [
+        dYy.symbolic && `\\dfrac{\\partial Y}{\\partial y} = ${dYy.tex}`,
+        dYx?.symbolic && `\\dfrac{\\partial Y}{\\partial x} = ${dYx.tex}`,
+        dXx?.symbolic && `\\dfrac{\\partial X}{\\partial x} = ${dXx.tex}`,
+        `\\sigma_Y = \\sqrt{${sigmaTerms.join(' + ')}}`,
+        dXx && `\\sigma_X = \\left|\\dfrac{\\partial X}{\\partial x}\\right| \\sigma_x`,
+        hasSigma && `\\sigma_{Y_1} = ${n(firstY)}`,
+      ],
+      content: h('div', { style: 'margin-top:10px' }, table(['X', 'Y', 'σX', 'σY'], X.map((value, i) => [fmt(value), fmt(Y[i]), fmt(sX[i]), fmt(sY[i])]))),
+    };
+    nodes.push(procedure([
+      transformStep,
+      propagationStep,
+      ...linearSteps(X, Y, fit, { confidence, k, propagatedX: Boolean(fit.weighted && s.propagateX && sX.some((value) => value > 0)) }),
+      ...(derivedSteps ?? []),
+    ]));
+
+    nodes.push(card('Resumen del ajuste',
       keyValues([
         ['Pendiente m y su incertidumbre estándar', `${fmt(m)} ± ${fmt(um)}`],
         ['Ordenada b y su incertidumbre estándar', `${fmt(b)} ± ${fmt(ub)}`],

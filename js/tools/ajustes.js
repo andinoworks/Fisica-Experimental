@@ -1,13 +1,15 @@
 // Ajustes por cuadrados mínimos. Reemplaza a cuad_minimos.py, cuad_minimos_EXP.py,
 // ajuste_lineal_ponderado.py y ajuste_polinomial.py: comparten el mismo motor.
 
-import { answer, card, group, h, keyValues, more, note, row, table, verdict } from '../ui/dom.js';
+import { answer, card, group, h, keyValues, more, note, row, table, tex, verdict } from '../ui/dom.js';
 import { fitChart } from '../ui/plot.js';
 import { fmt, fmtInt, fmtMeasurement } from '../core/format.js';
 import { parseNumbers, parseScalar, scalarOrList } from '../core/parse.js';
 import { coverage } from '../core/stats.js';
 import { fitPolynomial, fitWithXUncertainty } from '../core/fit.js';
 import { confidenceOf, percentOf } from './comunes.js';
+import { procedure } from '../ui/procedimiento.js';
+import { linearSteps, polynomialSteps, predictionMath } from './pasos-ajuste.js';
 
 export function readXY(s) {
   const x = parseNumbers(s.x);
@@ -84,7 +86,7 @@ export function predictionCard(fit, text, k, confidence) {
   const x0 = parseScalar(text);
   if (x0 === null) return null;
   const p = fit.predict(x0);
-  return card(`Valor de y en x = ${fmt(x0)}`, keyValues([
+  return card(`Valor de y en x = ${fmt(x0)}`, h('div', { class: 'math-list', style: 'margin-bottom:10px' }, predictionMath(fit, x0).map((source) => h('div', {}, tex(source)))), keyValues([
     ['Resultado', fmtMeasurement(p.y, k * p.u)],
     ['Valor', fmt(p.y)],
     ['Incertidumbre estándar (con covarianza)', fmt(p.u)],
@@ -162,7 +164,11 @@ function straightLineTool(config) {
         filename: config.id, logX: s.logX, logY: s.logY,
       })));
 
-      nodes.push(card('Resultados del ajuste',
+      nodes.push(procedure(linearSteps(data.x, data.y, fit, {
+        confidence, k, symM, symB, testB: s.testB, propagatedX: Boolean(config.weighted && s.propagateX && data.ex),
+      })));
+
+      nodes.push(card('Resumen del ajuste',
         keyValues([
           ['Puntos N', fmtInt(fit.N)],
           ['Grados de libertad ν = N−2', fmtInt(fit.nu)],
@@ -264,7 +270,8 @@ export const polinomial = {
         labelX: s.labelX.trim() || 'x', labelY: s.labelY.trim() || 'y', title: s.title.trim(),
         filename: 'ajuste-polinomial', logX: s.logX, logY: s.logY,
       })),
-      card('Resultados del ajuste',
+      procedure(polynomialSteps(data.x, data.y, fit, { confidence, k })),
+      card('Resumen del ajuste',
         table(['Coeficiente', 'Valor', 'u (1σ)', `U (${percentOf(confidence)})`], fit.coef.map((c, i) => [
           `${names[i]} (x^${i})`, fmt(c), fmt(fit.u[i]), fmt(k * fit.u[i]),
         ]).reverse()),

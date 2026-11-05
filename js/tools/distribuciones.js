@@ -6,6 +6,7 @@ import { fmt, fmtInt } from '../core/format.js';
 import { parseScalar } from '../core/parse.js';
 import { binomialPmf, coverage, fCdf, fInv, gaussianPdf, normCdf, normInv, poissonPmf, tCdf, tInv } from '../core/stats.js';
 import { confidenceOf, nuOf, percentOf, requireNumber } from './comunes.js';
+import { b as br, n as num, p as par, procedure } from '../ui/procedimiento.js';
 
 function discreteChart(values, mean, sigma, k, axisName, filename) {
   const grid = linspace(Math.min(...values.map((v) => v.k)) - 0.5, Math.max(...values.map((v) => v.k)) + 0.5);
@@ -93,6 +94,15 @@ export default {
         const nu = nuOf(s.nu);
         const nodes = [
           answer([{ label: `t crítico bilateral, ${percentOf(confidence)}, ν = ${fmtInt(nu)}`, value: fmt(coverage(confidence, nu)), detail: `Unilateral: ${fmt(tInv(confidence, nu))}` }]),
+          procedure([{
+            title: 'Definición',
+            text: 'Es el valor que deja α/2 de área en cada cola de la distribución t.',
+            math: [
+              `\\alpha = 1 - ${num(confidence)} = ${num(1 - confidence)}`,
+              `P(-t_{\\alpha/2,\\nu} < T < t_{\\alpha/2,\\nu}) = 1 - \\alpha`,
+              `t_{${num((1 - confidence) / 2)},\\,${num(nu)}} = ${num(coverage(confidence, nu))}`,
+            ],
+          }]),
           card('Otros niveles', table(['Confianza', 'Bilateral', 'Unilateral'], [0.68, 0.9, 0.95, 0.99, 0.999].map((c) => [percentOf(c), fmt(coverage(c, nu)), fmt(tInv(c, nu))]))),
         ];
         const t = parseScalar(s.tvalue);
@@ -111,6 +121,15 @@ export default {
         if (!(d1 > 0 && d2 > 0)) throw new Error('Los grados de libertad deben ser positivos.');
         const nodes = [
           answer([{ label: `F crítico de cola superior, α = ${fmt(alpha)}`, value: fmt(fInv(1 - alpha, d1, d2)), detail: `Cola inferior: F(1−α; ν₁, ν₂) = ${fmt(fInv(alpha, d1, d2))}` }]),
+          procedure([{
+            title: 'Definición',
+            text: 'Es el valor que deja un área α en la cola superior. La cola inferior cumple la propiedad 1.7 del apunte.',
+            math: [
+              `P(f > F_{\\alpha,\\nu_1,\\nu_2}) = \\alpha`,
+              `F_{${num(alpha)},\\,${num(d1)},\\,${num(d2)}} = ${num(fInv(1 - alpha, d1, d2))}`,
+              `F_{1-\\alpha,\\nu_1,\\nu_2} = \\dfrac{1}{F_{\\alpha,\\nu_2,\\nu_1}} = \\dfrac{1}{${num(fInv(1 - alpha, d2, d1))}} = ${num(fInv(alpha, d1, d2))}`,
+            ],
+          }]),
         ];
         const value = parseScalar(s.fvalue);
         if (value !== null) nodes.push(card('Valor p', keyValues([['Cola superior', fmt(1 - fCdf(value, d1, d2))]])));
@@ -136,12 +155,34 @@ export default {
         ];
         return [
           answer([{ label: `P(${a === null ? '−∞' : fmt(a)} ≤ X ≤ ${b === null ? '+∞' : fmt(b)})`, value: fmt(pb - pa), detail: `z de ${fmt(za)} a ${fmt(zb)}` }]),
+          procedure([
+            {
+              title: 'Estandarización',
+              math: [
+                `z = \\dfrac{x - \\mu}{\\sigma}`,
+                a !== null && `z_a = \\dfrac{${par(a)} - ${par(mu)}}{${num(sigma)}} = ${num(za)}`,
+                b !== null && `z_b = \\dfrac{${par(b)} - ${par(mu)}}{${num(sigma)}} = ${num(zb)}`,
+              ],
+            },
+            {
+              title: 'Probabilidad',
+              math: [`P = P(Z \\leq z_b) - P(Z \\leq z_a) = ${num(pb)} - ${num(pa)} = ${num(pb - pa)}`],
+            },
+          ]),
           card(null, chart(traces, { x: { title: 'x' }, y: { title: 'Densidad de probabilidad', rangemode: 'tozero' } }, { filename: 'normal' })),
         ];
       }
       case 'z': {
         const confidence = confidenceOf(s.confidence);
-        return [answer([{ label: `z bilateral, ${percentOf(confidence)}`, value: fmt(normInv(1 - (1 - confidence) / 2)), detail: `Unilateral: ${fmt(normInv(confidence))}` }])];
+        return [answer([{ label: `z bilateral, ${percentOf(confidence)}`, value: fmt(normInv(1 - (1 - confidence) / 2)), detail: `Unilateral: ${fmt(normInv(confidence))}` }]),
+          procedure([{
+            title: 'Definición',
+            math: [
+              `\\alpha = 1 - ${num(confidence)} = ${num(1 - confidence)}`,
+              `P(Z < z_{\\alpha/2}) = 1 - \\dfrac{\\alpha}{2} = ${num(1 - (1 - confidence) / 2)}`,
+              `z_{\\alpha/2} = ${num(normInv(1 - (1 - confidence) / 2))}`,
+            ],
+          }])];
       }
       case 'binomial': {
         if (!s.n.trim() || !s.prob.trim() || !s.k.trim()) return null;
@@ -159,6 +200,22 @@ export default {
         for (let i = from; i <= to; i += 1) values.push({ k: i, p: binomialPmf(i, n, p) });
         return [
           ...probabilityBlock((i) => binomialPmf(i, n, p), n, k, 'k'),
+          procedure([
+            {
+              title: 'Probabilidad de k éxitos en n ensayos',
+              math: [
+                `P(k) = \\dfrac{n!}{k!\\,(n-k)!}\\, p^{k} (1-p)^{n-k}`,
+                `P(${k}) = \\dfrac{${n}!}{${k}!\\,${n - k}!} \\cdot ${br(p)}^{${k}} \\cdot ${br(1 - p)}^{${n - k}} = ${num(binomialPmf(k, n, p))}`,
+              ],
+            },
+            {
+              title: 'Media y desvío',
+              math: [
+                `\\mu = n p = ${n} \\cdot ${num(p)} = ${num(mean)}`,
+                `\\sigma = \\sqrt{n p (1-p)} = \\sqrt{${n} \\cdot ${num(p)} \\cdot ${num(1 - p)}} = ${num(sigma)}`,
+              ],
+            },
+          ]),
           card('Parámetros', keyValues([['Media np', fmt(mean)], ['Desvío √(np(1−p))', fmt(sigma)]])),
           discreteChart(values, mean, sigma, k, 'Número de éxitos', 'binomial'),
         ];
@@ -176,6 +233,16 @@ export default {
         for (let i = from; i <= to; i += 1) values.push({ k: i, p: poissonPmf(i, mu) });
         return [
           ...probabilityBlock((i) => poissonPmf(i, mu), k, k, 'k'),
+          procedure([
+            {
+              title: 'Probabilidad de k eventos',
+              math: [
+                `P_{\\mu}(k) = e^{-\\mu} \\dfrac{\\mu^{k}}{k!}`,
+                `P_{${num(mu)}}(${k}) = e^{-${num(mu)}} \\cdot \\dfrac{${br(mu)}^{${k}}}{${k}!} = ${num(poissonPmf(k, mu))}`,
+              ],
+            },
+            { title: 'Desvío', math: [`\\sigma = \\sqrt{\\mu} = \\sqrt{${num(mu)}} = ${num(sigma)}`] },
+          ]),
           card('Parámetros', keyValues([['Media μ', fmt(mu)], ['Desvío √μ', fmt(sigma)]])),
           discreteChart(values, mu, sigma, k, 'Número de eventos', 'poisson'),
         ];
@@ -185,7 +252,11 @@ export default {
         if (rel === null) return null;
         if (!(rel > 0)) throw new Error('La incertidumbre relativa debe ser mayor que cero.');
         return [
-          answer([{ label: 'Grados de libertad', value: `ν ≈ ${fmt(0.5 / (rel * rel))}`, detail: 'ν = ½ · [u(s)/s]⁻², ecuación 4.5 de la Serie C 9/15.' }]),
+          answer([{ label: 'Grados de libertad', value: `ν ≈ ${fmt(0.5 / (rel * rel))}`, detail: 'Ecuación 4.5 de la Serie C 9/15.' }]),
+          procedure([{
+            title: 'Fórmula',
+            math: [`\\nu \\approx \\dfrac{1}{2} \\left[\\dfrac{u(s)}{s}\\right]^{-2} = \\dfrac{1}{2} ${br(rel)}^{-2} = ${num(0.5 / (rel * rel))}`],
+          }]),
           note('info', 'Si la incertidumbre tipo B se considera exacta, poné ν = ∞ dejando el campo vacío en Propagación.'),
         ];
       }

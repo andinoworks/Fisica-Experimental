@@ -16,7 +16,7 @@ globalThis.jStat = jstat.jStat ?? jstat;
 globalThis.mlMatrix = load('matrix.umd.js');
 
 const stats = await import('../js/core/stats.js');
-const { fitPolynomial, fitWithXUncertainty } = await import('../js/core/fit.js');
+const { fitPolynomial, fitWithXUncertainty, linearDetails, normalMatrices } = await import('../js/core/fit.js');
 const sym = await import('../js/core/symbolic.js');
 const { parseNumbers, parseNu, scalarOrList } = await import('../js/core/parse.js');
 const { fmtMeasurement, fmt, numberFormat } = await import('../js/core/format.js');
@@ -257,6 +257,124 @@ for (const degree of [2, 3]) {
   throws('pocos puntos', () => fitPolynomial([1, 2], [1, 2], { degree: 1 }));
   throws('x repetidos', () => fitPolynomial([1, 1, 1, 1], [1, 2, 3, 4], { degree: 1 }));
   throws('σ cero', () => fitPolynomial([1, 2, 3], [1, 2, 3], { degree: 1, sigma: [0, 1, 1] }));
+}
+
+// ---------- El procedimiento que se muestra coincide con el ajuste ----------
+{
+  const r = ref.lineal;
+  const f = fitPolynomial(r.x, r.y, { degree: 1 });
+  const d = linearDetails(r.x, r.y);
+  close('fórmulas pendiente', d.a, f.coef[1]);
+  close('fórmulas ordenada', d.b, f.coef[0]);
+  close('fórmulas s_m', d.ua, f.u[1]);
+  close('fórmulas s_b', d.ub, f.u[0]);
+  close('fórmulas r2', d.r2, f.r2);
+}
+{
+  const r = ref.ponderado;
+  const f = fitPolynomial(r.x, r.y, { degree: 1, sigma: r.e });
+  const d = linearDetails(r.x, r.y, r.e);
+  close('pesadas pendiente', d.a, f.coef[1]);
+  close('pesadas ordenada', d.b, f.coef[0]);
+  close('pesadas s_m', d.ua, f.u[1]);
+  close('pesadas s_b', d.ub, f.u[0]);
+  close('pesadas χ²', d.s2, f.residualVariance);
+  close('pesadas r2', d.r2, f.r2);
+}
+{
+  // α del apunte para la glucosa, y α·α⁻¹ = identidad
+  const x = [1, 2, 3, 4, 5, 6, 7, 8];
+  const y = [74, 54, 52, 51, 52, 53, 58, 71];
+  const sigma = new Array(8).fill(1);
+  const { alpha, beta } = normalMatrices(x, y, sigma, 2);
+  close('glucosa α00', alpha[0][0], 8);
+  close('glucosa α12', alpha[1][2], 1296);
+  close('glucosa β0', beta[0], 465);
+  close('glucosa β2', beta[2], 12168);
+  const inverse = fitPolynomial(x, y, { degree: 2, sigma }).alphaInverse;
+  for (let i = 0; i < 3; i += 1) {
+    for (let j = 0; j < 3; j += 1) {
+      const product = alpha[i].reduce((sum, value, k) => sum + value * inverse[k][j], 0);
+      close(`α·α⁻¹ ${i}${j}`, product, i === j ? 1 : 0, 1e-8);
+    }
+  }
+}
+{
+  // Sustitución de valores en una fórmula
+  const c = sym.compileFormula('M * R^2 / 2');
+  const text = sym.nodeToTexWith(c.node, { M: 252.6, R: 6.35 }, String);
+  equal('sustitución M', text.includes('252.6'), true);
+  equal('sustitución R', text.includes('6.35'), true);
+}
+
+// ---------- Sesiones ----------
+{
+  const { createSessions } = await import('../js/sesiones.js');
+  const fakeStorage = (initial = {}) => {
+    const map = new Map(Object.entries(initial));
+    return {
+      map,
+      getItem: (key) => (map.has(key) ? map.get(key) : null),
+      setItem: (key, value) => { map.set(key, value); },
+      removeItem: (key) => { map.delete(key); },
+    };
+  };
+  const defaults = { a: { x: '', on: false, vars: {} }, b: { y: '' } };
+
+  // Los datos anteriores no se pierden al aparecer las sesiones
+  const legacy = fakeStorage({ 'labdatos:a': JSON.stringify({ x: '1 2 3' }) });
+  let s = createSessions(legacy, defaults);
+  equal('migración conserva datos', s.getTool('a'), { x: '1 2 3' });
+  equal('migración borra la clave vieja', legacy.map.has('labdatos:a'), false);
+  equal('primera sesión', s.activeName, 'Sesión 1');
+
+  const first = s.activeId;
+  const second = s.create('Lab 3').id;
+  equal('sesión nueva vacía', s.getTool('a'), null);
+  s.setTool('a', { x: '9' });
+  s.switchTo(first);
+  equal('cambiar no pierde datos', s.getTool('a'), { x: '1 2 3' });
+  s.switchTo(second);
+  equal('volver recupera datos', s.getTool('a'), { x: '9' });
+
+  s = createSessions(legacy, defaults);
+  equal('reabrir conserva la activa', s.activeId, second);
+  equal('reabrir conserva los datos', s.getTool('a'), { x: '9' });
+
+  equal('nombres repetidos', s.create('Lab 3').name, 'Lab 3 (2)');
+  s.rename(s.activeId, 'Lab 4');
+  equal('renombrar', s.activeName, 'Lab 4');
+  s.remove(s.activeId);
+  equal('eliminar pasa a otra', s.list().length, 2);
+  equal('eliminar no toca las otras', s.list().some((entry) => entry.id === first), true);
+
+  // Exportar e importar
+  s.switchTo(second);
+  const text = s.exportText();
+  const other = createSessions(fakeStorage(), defaults);
+  const imported = other.importText(text);
+  equal('importar nombre', imported.name, 'Lab 3');
+  equal('importar activa', other.activeName, 'Lab 3');
+  equal('importar datos', other.getTool('a'), { x: '9' });
+  throws('archivo ajeno', () => other.importText('{"a":1}'));
+  throws('archivo roto', () => other.importText('no es json'));
+
+  // Un archivo con campos raros no entra al estado de la herramienta
+  other.importText(JSON.stringify({ app: 'laboratorio-datos', name: 'x', tools: { a: { x: 5, on: true, vars: [], otro: '1' }, c: { z: 1 } } }));
+  equal('importar filtra campos', other.getTool('a'), { on: true });
+  equal('importar ignora herramientas desconocidas', other.getTool('c'), null);
+
+  // Borrar todas deja una vacía
+  const only = createSessions(fakeStorage(), defaults);
+  only.remove(only.activeId);
+  equal('siempre queda una sesión', only.list().length, 1);
+
+  // Sin almacenamiento, funciona en memoria y avisa
+  const broken = { getItem() { throw new Error(); }, setItem() { throw new Error(); }, removeItem() { throw new Error(); } };
+  const memory = createSessions(broken, defaults);
+  equal('sin almacenamiento avisa', memory.setTool('a', { x: '7' }), false);
+  equal('sin almacenamiento conserva en memoria', memory.getTool('a'), { x: '7' });
+  equal('sin almacenamiento marca el fallo', memory.saveFailed, true);
 }
 
 // ---------- Datos y formato ----------

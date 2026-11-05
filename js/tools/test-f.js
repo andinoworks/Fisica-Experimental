@@ -1,6 +1,7 @@
 // Test F de igualdad de varianzas. Reemplaza a test_f.py.
 
 import { answer, card, keyValues, row, group, note } from '../ui/dom.js';
+import { n, p, procedure } from '../ui/procedimiento.js';
 import { fmt, fmtInt } from '../core/format.js';
 import { parseNumbers, parseScalar } from '../core/parse.js';
 import { fTest, variance } from '../core/stats.js';
@@ -14,17 +15,71 @@ function readSample(s, suffix) {
     return { v: variance(values), n: values.length };
   }
   const given = parseScalar(s[`v${suffix}`]);
-  const n = parseScalar(s[`n${suffix}`]);
-  if (given === null || n === null) return null;
+  const count = parseScalar(s[`n${suffix}`]);
+  if (given === null || count === null) return null;
   if (given <= 0) throw new Error('Las varianzas y los desvíos deben ser mayores que cero.');
-  return { v: s.mode === 'sd' ? given * given : given, n };
+  return { v: s.mode === 'sd' ? given * given : given, n: count };
+}
+
+// Los pasos del test F, también usados en "Comparar valores".
+export function fTestSteps({ var1, n1, var2, n2, result: r, confidence, alt, titlePrefix = '' }) {
+  const alpha = 1 - confidence;
+  const relation = { two: '\\neq', greater: '>', less: '<' }[alt];
+  const hypotheses = {
+    title: `${titlePrefix}hipótesis`.replace(/^h/, 'H'),
+    math: [`H_0:\\ \\sigma_1^{2} = \\sigma_2^{2}`, `H_a:\\ \\sigma_1^{2} ${relation} \\sigma_2^{2}`],
+  };
+  if (alt === 'two') {
+    const big = r.firstIsLarger ? var1 : var2;
+    const small = r.firstIsLarger ? var2 : var1;
+    return [
+      hypotheses,
+      {
+        title: `${titlePrefix}estadístico F`.replace(/^e/, 'E'),
+        text: 'Se pone la varianza mayor en el numerador.',
+        math: [
+          `f = \\dfrac{s_{\\text{mayor}}^{2}}{s_{\\text{menor}}^{2}} = \\dfrac{${n(big)}}{${n(small)}} = ${n(r.f)}`,
+          `\\nu_1 = ${n(r.d1)} \\ \\text{(numerador)}, \\qquad \\nu_2 = ${n(r.d2)} \\ \\text{(denominador)}`,
+        ],
+      },
+      {
+        title: `${titlePrefix}valor crítico y decisión`.replace(/^v/, 'V'),
+        math: [
+          `\\alpha = 1 - ${n(confidence)} = ${n(alpha)}`,
+          `F_{\\alpha/2,\\,\\nu_1,\\,\\nu_2} = F_{${n(alpha / 2)},\\,${n(r.d1)},\\,${n(r.d2)}} = ${n(r.critical)}`,
+          `f = ${n(r.f)} ${r.reject ? '\\geq' : '<'} ${n(r.critical)}`,
+        ],
+        conclusion: r.reject ? 'Se rechaza H₀: las varianzas no son homogéneas.' : 'No se rechaza H₀: las varianzas son homogéneas.',
+      },
+    ];
+  }
+  return [
+    hypotheses,
+    {
+      title: 'Estadístico F',
+      math: [
+        `f = \\dfrac{s_1^{2}}{s_2^{2}} = \\dfrac{${p(var1)}}{${p(var2)}} = ${n(r.f)}`,
+        `\\nu_1 = ${n1 - 1}, \\qquad \\nu_2 = ${n2 - 1}`,
+      ],
+    },
+    {
+      title: 'Valor crítico y decisión',
+      math: [
+        `\\alpha = 1 - ${n(confidence)} = ${n(alpha)}`,
+        alt === 'greater'
+          ? `F_{\\alpha,\\,\\nu_1,\\,\\nu_2} = ${n(r.critical)}, \\qquad f = ${n(r.f)} ${r.reject ? '\\geq' : '<'} ${n(r.critical)}`
+          : `F_{1-\\alpha,\\,\\nu_1,\\,\\nu_2} = ${n(r.critical)}, \\qquad f = ${n(r.f)} ${r.reject ? '\\leq' : '>'} ${n(r.critical)}`,
+      ],
+      conclusion: r.reject ? 'Se rechaza H₀: las varianzas no son homogéneas.' : 'No se rechaza H₀: las varianzas son homogéneas.',
+    },
+  ];
 }
 
 export default {
   id: 'test-f',
   group: 'Muestras y comparación',
   title: 'Test F de varianzas',
-  short: 'Decide si se usa Student agrupado o Welch',
+  short: 'Analiza si las varianzas son homogéneas: Student agrupado o Welch',
   description: 'Compara dos varianzas para decidir si son homogéneas. El resultado indica qué versión del test de Student corresponde usar después.',
   origin: 'Reemplaza a test_f.py. Teoría: Serie C 9/15, sección 1.1.3.',
   hint: 'Cargá las dos muestras para comparar sus varianzas.',
@@ -35,7 +90,6 @@ export default {
   ],
   form(f, s) {
     const summary = () => s.mode !== 'raw';
-    const name = () => (s.mode === 'sd' ? 'Desvío s' : 'Varianza s²');
     return [
       f.select('mode', {
         label: 'Qué tenés',
@@ -61,8 +115,15 @@ export default {
     if (!a || !b) return null;
     const confidence = confidenceOf(s.confidence);
     const r = fTest({ var1: a.v, n1: a.n, var2: b.v, n2: b.n, confidence, alt: s.alt });
-    const larger = r.firstIsLarger ? 'método 1' : 'método 2';
     const compatible = !r.reject;
+    const varianceStep = {
+      title: 'Varianzas muestrales',
+      math: [
+        s.mode === 'raw' && `s^{2} = \\dfrac{\\sum (x_i - \\bar{x})^{2}}{N - 1}`,
+        `s_1^{2} = ${n(a.v)}, \\quad N_1 = ${n(a.n)}`,
+        `s_2^{2} = ${n(b.v)}, \\quad N_2 = ${n(b.n)}`,
+      ],
+    };
     return [
       answer([{
         label: `Resultado al ${percentOf(confidence)}`,
@@ -72,14 +133,15 @@ export default {
           : 'Para comparar las medias corresponde Welch-Satterthwaite.',
       }]),
       note(compatible ? 'ok' : 'warn', compatible ? 'No se rechaza H₀: σ₁² = σ₂².' : 'Se rechaza H₀: σ₁² = σ₂².'),
-      card('Detalle', keyValues([
-        ['Varianza del método 1', `${fmt(a.v)} (ν = ${fmtInt(a.n - 1)})`],
-        ['Varianza del método 2', `${fmt(b.v)} (ν = ${fmtInt(b.n - 1)})`],
-        s.alt === 'two' && ['Numerador (varianza mayor)', larger],
+      procedure([
+        varianceStep,
+        ...fTestSteps({ var1: a.v, n1: a.n, var2: b.v, n2: b.n, result: r, confidence, alt: s.alt }),
+      ]),
+      card('Resumen', keyValues([
         ['Estadístico F', fmt(r.f)],
         ['F crítico', `${fmt(r.critical)} (ν₁ = ${fmtInt(r.d1)}, ν₂ = ${fmtInt(r.d2)})`],
         ['Valor p', fmt(r.p)],
-      ].filter(Boolean))),
+      ])),
     ];
   },
 };

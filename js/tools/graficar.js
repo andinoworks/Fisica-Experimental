@@ -4,6 +4,7 @@ import { card, group, h, note, row } from '../ui/dom.js';
 import { chart, dataTrace, lineTrace, linspace, logspace, SERIES } from '../ui/plot.js';
 import { parseNumbers, parseScalar, scalarOrList } from '../core/parse.js';
 import { compileFormula, partialDerivative } from '../core/symbolic.js';
+import { procedure } from '../ui/procedimiento.js';
 
 const MAX_FUNCTIONS = SERIES.length;
 
@@ -104,6 +105,7 @@ export default {
 
     const traces = [];
     const notes = [];
+    const derivatives = [];
     if (functions.length) {
       let xmin = parseScalar(s.xmin);
       let xmax = parseScalar(s.xmax);
@@ -125,6 +127,7 @@ export default {
         traces.push(lineTrace(grid, values, { name: line, color }));
         if (s.derivative) {
           const d = partialDerivative(compiled, 'x');
+          if (d.symbolic) derivatives.push(`\\dfrac{d}{dx}\\left(${compiled.tex}\\right) = ${d.tex}`);
           if (d.symbolic) traces.push(lineTrace(grid, sample(d.code, grid, constants), { name: `Derivada de ${line}`, color, dash: 'dash' }));
           else notes.push(note('warn', `No hay derivada simbólica para "${line}".`));
         }
@@ -147,6 +150,7 @@ export default {
         y: { title: s.labelY.trim() || 'y', type: s.logY ? 'log' : 'linear' },
         legend: traces.length > 1,
       }, { filename: 'funciones', tall: true })),
+      derivatives.length > 0 && procedure([{ title: 'Derivadas', math: derivatives }], 'Procedimiento'),
     ];
   },
 };

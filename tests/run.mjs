@@ -222,6 +222,26 @@ for (const degree of [2, 3]) {
   equal('tex griego', sym.symbolTex('rho'), '\\rho');
 }
 {
+  // Constantes sin valor
+  equal('sin la opción, c1 es variable', sym.compileFormula('c1 * x').variables, ['c1', 'x']);
+  const c = sym.compileFormula('q = c1 * x / y + 0 * k', { constants: ['k'] });
+  equal('c1 y k son constantes', [c.variables, c.constants.sort()], [['x', 'y'], ['c1', 'k']]);
+  const x = { name: 'x', value: 2, u: 0.1, nu: 4 };
+  const y = { name: 'y', value: 4, u: 0.2, nu: 9 };
+  const ref = sym.propagate(sym.compileFormula('x / y'), [x, y]);
+  const prop = sym.propagateWithConstants(sym.compileFormula('c1 * x / y', { constants: true }), [x, y]);
+  equal('proporcional a la constante', prop.kind, 'factor');
+  close('coeficiente', prop.coefficient, 0.5);
+  close('u_c por unidad de c1', prop.uc, ref.uc);
+  equal('ν no depende de c1', prop.nuEff, ref.nuEff);
+  close('U por unidad de c1', prop.U, ref.U);
+  const add = sym.propagateWithConstants(sym.compileFormula('x + c2', { constants: true }), [x]);
+  equal('sumada: u_c fija', [add.kind, add.uc], ['fixed', 0.1]);
+  const mixed = sym.propagateWithConstants(sym.compileFormula('c1 * x + c2 * y', { constants: true }), [x, y]);
+  equal('mezcla: u_c en función de las constantes', [mixed.kind, mixed.nuEff, mixed.U], ['general', null, null]);
+  close('mezcla: u_c² simbólica', mixed.varianceNode.evaluate({ c1: 2, c2: 3 }), (2 * 0.1) ** 2 + (3 * 0.2) ** 2);
+}
+{
   // Tipo B sola: todos los ν infinitos llevan a z
   const c = sym.compileFormula('a + b');
   const res = sym.propagate(c, [{ name: 'a', value: 1, u: 0.1, nu: Infinity }, { name: 'b', value: 2, u: 0.1, nu: Infinity }]);

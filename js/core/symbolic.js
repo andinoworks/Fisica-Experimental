@@ -69,8 +69,16 @@ function friendlyParseError(error, text) {
   return new Error(`No pude leer la fórmula "${text}"${where}. Revisá paréntesis y operadores.`);
 }
 
+// Constantes sin valor: c1, c2, c3… siempre, más los nombres que pida el usuario.
+const AUTO_CONSTANT = /^c\d+$/;
+
+export function parseConstantNames(text) {
+  return String(text ?? '').split(/[\s,;]+/).map((name) => name.trim()).filter(Boolean);
+}
+
 // "gamma = x1/(x1-x2)" o solo "x1/(x1-x2)".
-export function compileFormula(source) {
+// options.constants: activa las constantes simbólicas (true o una lista de nombres extra).
+export function compileFormula(source, options = {}) {
   const raw = normalizeFormula(source).trim();
   if (!raw) throw new Error('Escribí una fórmula.');
   const equal = raw.indexOf('=');
@@ -93,12 +101,17 @@ export function compileFormula(source) {
     }
   }
 
+  const extra = options.constants ? new Set(Array.isArray(options.constants) ? options.constants : []) : null;
+  const isSymbolicConstant = (name) => extra !== null && (AUTO_CONSTANT.test(name) || extra.has(name));
   const names = new Set();
+  const constants = new Set();
   // El nombre de una función (path 'fn') también es un SymbolNode, pero no es una variable.
   node.traverse((n, path) => {
-    if (n.isSymbolNode && path !== 'fn' && !CONSTANTS.has(n.name)) names.add(n.name);
+    if (!n.isSymbolNode || path === 'fn' || CONSTANTS.has(n.name)) return;
+    if (isSymbolicConstant(n.name)) constants.add(n.name);
+    else names.add(n.name);
   });
-  return { output, node, code: node.compile(), variables: [...names], tex: nodeToTex(node) };
+  return { output, node, code: node.compile(), variables: [...names], constants: [...constants], tex: nodeToTex(node) };
 }
 
 function toReal(value, context) {
@@ -212,4 +225,128 @@ export function propagatePaired(compiled, series, fixed, confidence = 0.95) {
   const nu = n - 1;
   const k = coverage(confidence, nu);
   return { values, y: mean, s, u, nu, k, U: k * u };
+}
+
+// ---------- Constantes sin valor ----------
+// Se reemplazan los valores de las variables y las constantes quedan como letras: el
+// resultado es una expresión en c1, c2… Para saber cómo dependen u_c y ν de las
+// constantes, se evalúa todo con varios juegos de valores de prueba.
+
+const SIMPLIFY = { exactFractions: false };
+const simplifyWith = (node, scope) => math().simplify(node, scope, SIMPLIFY);
+
+// La expresión con los números escritos por numberTex y los símbolos con symbolTex.
+export function nodeToTexNumbers(node, numberTex) {
+  const handler = (n) => {
+    if (n.isSymbolNode && !CONSTANTS.has(n.name)) return `{${symbolTex(n.name)}}`;
+    if (n.isConstantNode && typeof n.value === 'number') return `{${numberTex(n.value)}}`;
+    return undefined;
+  };
+  return node.toTex({ parenthesis: 'auto', implicit: 'show', handler });
+}
+
+const sameEverywhere = (values) => values.every((v) => Math.abs(v - values[0]) <= 1e-9 * Math.max(Math.abs(values[0]), 1e-300));
+
+// Separa q = A · m(c): A es el factor numérico de adelante y m el resto.
+function splitCoefficient(node) {
+  let sign = 1;
+  let current = node;
+  if (current.isOperatorNode && current.fn === 'unaryMinus') {
+    sign = -1;
+    [current] = current.args;
+  }
+  while (current.isParenthesisNode) current = current.content;
+  if (current.isOperatorNode && current.fn === 'multiply' && current.args[0].isConstantNode) {
+    const [first, ...rest] = current.args;
+    const restNode = rest.length === 1 ? rest[0] : new (math().OperatorNode)('*', 'multiply', rest);
+    return { coefficient: sign * first.value, rest: restNode };
+  }
+  return { coefficient: sign, rest: current };
+}
+
+// Valores de prueba para las constantes: positivos, por si aparecen en raíces o logaritmos.
+function constantSamples(constants) {
+  return [0, 1, 2, 3].map((k) => Object.fromEntries(constants.map((name, i) => [name, 0.7 + 0.37 * ((k * 7 + i * 3) % 11) + 0.13 * k])));
+}
+
+export function propagateWithConstants(compiled, inputs, covariances = [], confidence = 0.95) {
+  const scope = Object.fromEntries(inputs.map((input) => [input.name, input.value]));
+  const yNode = simplifyWith(compiled.node, scope);
+
+  const rows = inputs.map((input) => {
+    const derivative = partialDerivative(compiled, input.name);
+    if (!derivative.symbolic) throw new Error(`No pude derivar respecto de ${input.name}: con constantes sin valor hace falta la derivada simbólica.`);
+    return { ...input, derivative, cNode: simplifyWith(derivative.node, scope) };
+  });
+  const byName = Object.fromEntries(rows.map((row) => [row.name, row]));
+  const crossRows = covariances.filter(({ value }) => value);
+
+  const samples = constantSamples(compiled.constants);
+  const trials = samples.map((constantValues) => {
+    const full = { ...scope, ...constantValues };
+    const c = Object.fromEntries(rows.map((row) => [row.name, row.u > 0 ? sensitivity(compiled, row.derivative, full) : 0]));
+    const terms = rows.map((row) => [(c[row.name] * row.u) ** 2, row.nu]);
+    const independent = terms.reduce((sum, [t]) => sum + t, 0);
+    const variance = independent + crossRows.reduce((sum, { a, b, value }) => sum + 2 * c[a] * c[b] * value, 0);
+    return {
+      variance,
+      uc: Math.sqrt(Math.max(variance, 0)),
+      nuRaw: welchNu(terms, variance).raw,
+      shares: terms.map(([t]) => (independent > 0 ? t / independent : 0)),
+    };
+  });
+  if (trials.some((t) => t.variance < 0)) throw new Error('La varianza combinada da negativa: revisá las covarianzas (|Cov| no puede superar u₁·u₂).');
+
+  // u_c² y u_c como expresiones en las constantes.
+  const termText = rows.filter((row) => row.u > 0).map((row) => `(${row.cNode.toString()})^2 * (${row.u})^2`);
+  for (const { a, b, value } of crossRows) termText.push(`2 * (${byName[a].cNode.toString()}) * (${byName[b].cNode.toString()}) * (${value})`);
+  const varianceNode = simplifyWith(math().parse(termText.length ? termText.join(' + ') : '0'), {});
+  const ucNode = simplifyWith(math().parse(`sqrt(${varianceNode.toString()})`), {});
+
+  // ν efectivo, solo si no depende de las constantes.
+  let nuEff = null;
+  let nuRaw = null;
+  let clamped = false;
+  const raws = trials.map((t) => t.nuRaw);
+  if (raws.every((v) => v === Infinity)) {
+    nuRaw = Infinity;
+    nuEff = Infinity;
+  } else if (raws.every(Number.isFinite) && sameEverywhere(raws)) {
+    nuRaw = raws[0];
+    nuEff = Math.max(Math.floor(nuRaw), 1);
+    clamped = Math.floor(nuRaw) < 1;
+  }
+  const k = nuEff === null ? null : coverage(confidence, nuEff);
+
+  // Cómo queda u_c: un número fijo, proporcional al factor m(c) del resultado, o una expresión.
+  const { coefficient, rest } = splitCoefficient(yNode);
+  const restValues = samples.map((constantValues) => toReal(rest.evaluate({ ...constantValues }), 'La fórmula'));
+  let kind = 'general';
+  let uc = null;
+  if (sameEverywhere(trials.map((t) => t.uc))) {
+    kind = 'fixed';
+    uc = trials[0].uc;
+  } else if (compiled.constants.length && restValues.every((v) => v !== 0) && sameEverywhere(trials.map((t, i) => t.uc / Math.abs(restValues[i])))) {
+    kind = 'factor';
+    uc = trials[0].uc / Math.abs(restValues[0]);
+  }
+  const sharesKnown = trials.every((t) => t.shares.every((value, i) => Math.abs(value - trials[0].shares[i]) < 1e-9));
+
+  return {
+    constants: compiled.constants,
+    yNode,
+    coefficient,
+    rest,
+    rows: rows.map((row, i) => ({ ...row, share: sharesKnown ? trials[0].shares[i] : null })),
+    crossRows,
+    varianceNode,
+    ucNode,
+    kind,
+    uc,
+    U: k === null || uc === null ? null : k * uc,
+    nuEff,
+    nuRaw,
+    clamped,
+    k,
+  };
 }

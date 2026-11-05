@@ -20,7 +20,19 @@ export const p = (value) => (value < 0 ? `\\left(${n(value)}\\right)` : n(value)
 // Paréntesis siempre: para potencias como (u)².
 export const b = (value) => `\\left(${n(value)}\\right)`;
 
-export const sumOf = (terms) => terms.join(' + ').replace(/\+ -/g, '- ');
+// a = b = c sin repetir miembros iguales (por ejemplo "= 1 = 1" cuando la derivada es constante).
+const texKey = (source) => source.replace(/\\left\(|\\right\)/g, '').replace(/[{}()\s]/g, '');
+export function chain(parts) {
+  const kept = [];
+  for (const part of parts) {
+    if (!part) continue;
+    if (kept.length && texKey(kept[kept.length - 1]) === texKey(part)) continue;
+    kept.push(part);
+  }
+  return kept.join(' = ');
+}
+
+export const sumOf =(terms) => terms.join(' + ').replace(/\+ -/g, '- ');
 
 export function procedure(steps, title = 'Procedimiento') {
   return h('section', { class: 'card procedure' },
@@ -98,13 +110,13 @@ export function combinedSteps(compiled, r) {
       title: 'Valor del resultado',
       math: [
         `${lhs} = ${compiled.tex}`,
-        `${lhs} = ${nodeToTexWith(compiled.node, scope, number)} = ${n(r.y)}`,
+        chain([lhs, nodeToTexWith(compiled.node, scope, number), n(r.y)]),
       ],
     },
     {
       title: 'Coeficientes de sensibilidad (derivadas parciales)',
       math: r.rows.map((row) => (row.derivative.symbolic
-        ? `c_{${symbolTex(row.name)}} = ${partial(row.name)} = ${row.derivative.tex} = ${nodeToTexWith(row.derivative.node, scope, number)} = ${n(row.c)}`
+        ? chain([`c_{${symbolTex(row.name)}}`, partial(row.name), row.derivative.tex, nodeToTexWith(row.derivative.node, scope, number), n(row.c)])
         : `c_{${symbolTex(row.name)}} = ${partial(row.name)} = ${n(row.c)} \\ \\text{(numérica)}`)),
     },
   ];

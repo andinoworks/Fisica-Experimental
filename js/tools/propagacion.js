@@ -5,16 +5,20 @@ import { answer, card, h, keyValues, note, row, table, tex } from '../ui/dom.js'
 import { fmt, fmtInt, fmtMeasurement, percent } from '../core/format.js';
 import { parseNumbers, parseNu, parseScalar } from '../core/parse.js';
 import { covariance, summarize } from '../core/stats.js';
-import { compileFormula, propagate, propagatePaired, symbolTex } from '../core/symbolic.js';
+import { compileFormula, nodeToTexNumbers, nodeToTexWith,parseConstantNames, propagate, propagatePaired, propagateWithConstants, symbolTex } from '../core/symbolic.js';
 import { confidenceOf, percentOf } from './comunes.js';
-import { b as br, combinedSteps, expandedStep, n as num, procedure, welchStep } from '../ui/procedimiento.js';
+import { b as br, chain, combinedSteps, expandedStep, n as num, p as par, procedure, welchStep } from '../ui/procedimiento.js';
 
 const emptyVariable = () => ({ mode: 'direct', value: '', u: '', nu: '', data: '', ub: '' });
 const pairKey = (a, b) => `${a}|${b}`;
 
+// c1, c2… siempre son constantes sin valor; el campo "constantes" agrega otros nombres.
+const compileState = (s) => compileFormula(s.formula, { constants: parseConstantNames(s.constants) });
+
 function detect(s) {
   try {
-    return compileFormula(s.formula).variables;
+    const compiled = compileState(s);
+    return { variables: compiled.variables, constants: compiled.constants };
   } catch {
     return null;
   }
@@ -40,6 +44,128 @@ function readVariable(name, v) {
   return { name, value, u, nu: parseNu(v.nu) };
 }
 
+function inputLines(inputs) {
+  return inputs.map((input) => {
+    const name = symbolTex(input.name);
+    if (input.values) {
+      const lines = [
+        `\\bar{${name}} = ${num(input.value)}, \\quad s = ${num(input.s)}, \\quad N = ${input.n}`,
+        `s_{\\bar{${name}}} = \\dfrac{s}{\\sqrt{N}} = \\dfrac{${num(input.s)}}{\\sqrt{${input.n}}} = ${num(input.sem)}`,
+      ];
+      if (input.ub > 0) {
+        lines.push(`u(${name}) = \\sqrt{s_{\\bar{${name}}}^{2} + u_B^{2}} = \\sqrt{${br(input.sem)}^{2} + ${br(input.ub)}^{2}} = ${num(input.u)}`);
+        lines.push(`\\nu_{${name}} = (N-1) \\left(\\dfrac{u}{s_{\\bar{${name}}}}\\right)^{4} = ${num(input.nu)}`);
+      } else {
+        lines.push(`u(${name}) = ${num(input.u)}, \\quad \\nu_{${name}} = N - 1 = ${num(input.nu)}`);
+      }
+      return lines;
+    }
+    if (input.u === 0) return [`${name} = ${num(input.value)} \\ \\text{(sin incertidumbre)}`];
+    return [`${name} = ${num(input.value)}, \\quad u(${name}) = ${num(input.u)}, \\quad \\nu_{${name}} = ${num(input.nu)}`];
+  }).flat();
+}
+
+// Resultado en función de constantes sin valor (c1, c2… o las que se agreguen).
+function withConstants(compiled, inputs, covariances, confidence, unit) {
+  const r = propagateWithConstants(compiled, inputs, covariances, confidence);
+  const lhs = compiled.output ? symbolTex(compiled.output) : 'q';
+  const expr = (node) => nodeToTexNumbers(node, par);
+  const scope = Object.fromEntries(inputs.map((input) => [input.name, input.value]));
+  const yTex = expr(r.yNode);
+  const restTex = expr(r.rest);
+  const unitText = unit ? ` ${unit}` : '';
+  const nodes = [];
+
+  const nuDetail = r.nuEff === null ? 'ν efectivo depende de las constantes' : r.nuEff === Infinity ? 'ν efectivo infinito' : `ν efectivo = ${fmtInt(r.nuEff)}`;
+  const kDetail = r.k === null ? '' : `k = ${fmt(r.k)}, `;
+  const level = `al ${percentOf(confidence)}`;
+  const entries = [];
+  if (r.kind === 'factor') {
+    entries.push({
+      label: r.U === null ? 'Resultado con incertidumbre estándar' : `Resultado con incertidumbre expandida, ${level}`,
+      value: h('span', {}, fmtMeasurement(r.coefficient, r.U ?? r.uc), ' · ', tex(restTex), unitText),
+      detail: h('span', {}, r.U === null ? `u_c = ${fmt(r.uc)} · ` : `U = ${fmt(r.U)} · `, tex(`\\left|${restTex}\\right|`), `, ${kDetail}${nuDetail}`),
+    });
+  } else if (r.kind === 'fixed') {
+    entries.push({
+      label: r.U === null ? 'Resultado con incertidumbre estándar' : `Resultado con incertidumbre expandida, ${level}`,
+      value: h('span', {}, tex(yTex), ` ± ${fmt(r.U ?? r.uc)}${unitText}`),
+      detail: `La incertidumbre no depende de las constantes. ${kDetail}${nuDetail}`,
+    });
+  } else {
+    entries.push({ label: 'Resultado', value: h('span', {}, tex(`${lhs} = ${yTex}`), unitText) });
+    entries.push({
+      label: 'Incertidumbre estándar combinada',
+      value: tex(`u_c(${lhs}) = ${expr(r.ucNode)}`),
+      detail: r.k === null ? nuDetail : `U = k·u_c con ${kDetail}${nuDetail} (${level})`,
+    });
+  }
+  nodes.push(answer(entries));
+
+  if (r.nuEff === null) nodes.push(note('warn', 'Los grados de libertad efectivos dependen del valor de las constantes, así que no se puede dar k ni U: queda la incertidumbre estándar.'));
+  else if (r.clamped) nodes.push(note('warn', 'ν efectivo dio menor que 1 y se tomó ν = 1.'));
+  if (r.crossRows.length) nodes.push(note('warn', 'Welch-Satterthwaite con covarianza es solo una aproximación: la covarianza no entra en el denominador de ν.'));
+
+  const partial = (name) => `\\dfrac{\\partial ${lhs}}{\\partial ${symbolTex(name)}}`;
+  const active = r.rows.filter((row) => row.u > 0);
+  const steps = [
+    { title: 'Datos de entrada', math: inputLines(inputs), text: `Constantes sin valor: ${compiled.constants.join(', ')}. Quedan como letras en todo el cálculo.` },
+    {
+      title: 'Valor del resultado',
+      math: [`${lhs} = ${compiled.tex}`, chain([lhs, nodeToTexWith(compiled.node, scope, par), yTex])],
+    },
+    {
+      title: 'Coeficientes de sensibilidad (derivadas parciales)',
+      math: r.rows.map((row) => chain([`c_{${symbolTex(row.name)}}`, partial(row.name), row.derivative.tex, expr(row.cNode)])),
+    },
+  ];
+  if (active.length) {
+    const general = active.map((row) => `\\left(${partial(row.name)}\\right)^{2} u^{2}(${symbolTex(row.name)})`);
+    const valued = active.map((row) => `\\left(${expr(row.cNode)}\\right)^{2} ${br(row.u)}^{2}`);
+    for (const { a, b, value } of r.crossRows) {
+      general.push(`2 ${partial(a)} ${partial(b)} u(${symbolTex(a)},${symbolTex(b)})`);
+      const ca = r.rows.find((row_) => row_.name === a).cNode;
+      const cb = r.rows.find((row_) => row_.name === b).cNode;
+      valued.push(`2 \\left(${expr(ca)}\\right) \\left(${expr(cb)}\\right) ${br(value)}`);
+    }
+    steps.push({
+      title: 'Incertidumbre estándar combinada',
+      math: [
+        `u_c(${lhs}) = \\sqrt{${general.join(' + ')}}`,
+        `u_c(${lhs}) = \\sqrt{${valued.join(' + ')}}`,
+        `u_c(${lhs}) = ${expr(r.ucNode)}`,
+        r.kind === 'factor' && `u_c(${lhs}) = ${num(r.uc)} \\left|${restTex}\\right|`,
+        r.kind === 'fixed' && `u_c(${lhs}) = ${num(r.uc)}`,
+      ].filter(Boolean),
+    });
+    if (r.nuEff !== null) {
+      steps.push({
+        title: 'Grados de libertad efectivos (Welch-Satterthwaite)',
+        text: r.nuEff === Infinity
+          ? 'Todas las incertidumbres tienen ν infinito, así que ν efectivo también es infinito.'
+          : 'Las constantes aparecen igual en el numerador y en el denominador y se cancelan, así que ν efectivo es un número.',
+        math: r.nuEff === Infinity ? [] : [`\\nu_{ef} = \\dfrac{u_c^{4}}{\\sum_i \\dfrac{c_i^{4}\\, u^{4}(x_i)}{\\nu_i}} = ${num(r.nuRaw)} \\Rightarrow \\nu_{ef} = ${r.nuEff}`],
+      });
+      steps.push({
+        title: 'Incertidumbre expandida',
+        math: r.kind === 'general'
+          ? [`k = ${num(r.k)}`, `U = k\\, u_c = ${num(r.k)} \\cdot ${expr(r.ucNode)}`]
+          : r.kind === 'factor'
+            ? [`k = ${num(r.k)}`, `U = k\\, u_c = ${num(r.k)} \\cdot ${num(r.uc)} \\left|${restTex}\\right| = ${num(r.U)} \\left|${restTex}\\right|`]
+            : [`k = ${num(r.k)}`, `U = k\\, u_c = ${num(r.k)} \\cdot ${num(r.uc)} = ${num(r.U)}`],
+      });
+    }
+  }
+  nodes.push(procedure(steps));
+
+  nodes.push(card('Presupuesto de incertidumbre',
+    table(['Variable', 'Valor', 'u', 'ν', 'c', 'Aporte a Σ(c·u)²'], r.rows.map((row_) => [
+      tex(symbolTex(row_.name)), fmt(row_.value), fmt(row_.u), row_.nu === Infinity ? '∞' : fmt(row_.nu),
+      tex(expr(row_.cNode)), row_.share === null ? 'depende de las constantes' : percent(row_.share),
+    ]))));
+  return nodes;
+}
+
 export default {
   id: 'propagacion',
   group: 'Incertidumbres',
@@ -49,7 +175,7 @@ export default {
   origin: 'Reemplaza a la parte A de welch_2variables.py. Teoría: Serie C 9/15, capítulos 2, 4 y 6.',
   wideForm: true,
   hint: 'Escribí la fórmula y completá los valores de cada variable.',
-  defaults: { formula: '', confidence: '95', unit: '', vars: {}, cov: {} },
+  defaults: { formula: '', confidence: '95', unit: '', constants: '', vars: {}, cov: {} },
   examples: [
     {
       label: 'Clément y Desormes (welch_2variables.py)',
@@ -85,9 +211,17 @@ export default {
         cov: { 'alpha|beta': { mode: 'manual', value: '-3' } },
       },
     },
+    {
+      label: 'Con una constante sin valor',
+      state: {
+        formula: 'F = c1 * x',
+        vars: { x: { mode: 'series', data: '0.112 0.115 0.110 0.114 0.113' } },
+      },
+    },
   ],
   form(f, s, ctx) {
     const variablesBox = h('div', { class: 'variables' });
+    const constantsBox = h('p', { class: 'help', style: 'color:var(--ink-2);font-size:.875rem;margin:0', hidden: true });
     const covBox = h('div', { class: 'variables' });
     const covSection = h('div', { class: 'group' },
       h('h3', {}, 'Correlación entre variables'),
@@ -144,27 +278,38 @@ export default {
       }));
     }
 
+    function renderConstants(constants) {
+      constantsBox.hidden = constants.length === 0;
+      constantsBox.replaceChildren(
+        h('strong', {}, constants.length === 1 ? 'Constante sin valor: ' : 'Constantes sin valor: '),
+        ...constants.flatMap((name, i) => [i ? ', ' : '', tex(symbolTex(name))]),
+        ' · el resultado queda en función de ', constants.length === 1 ? 'ella' : 'ellas', '.');
+    }
+
     function refreshStructure() {
-      const names = detect(s);
-      if (!names) return;
-      const next = names.join('|');
+      const found = detect(s);
+      if (!found) return;
+      const next = `${found.variables.join('|')}#${found.constants.join('|')}`;
       if (next === signature) return;
       signature = next;
-      renderVariables(names);
-      renderCovariances(names);
+      renderConstants(found.constants);
+      renderVariables(found.variables);
+      renderCovariances(found.variables);
     }
     ctx.onChange(refreshStructure);
 
     return [
-      f.text('formula', { label: 'Fórmula', placeholder: 'gamma = x1 / (x1 - x2)', help: 'Potencia con ^ o **; exp, ln o log, log10, sqrt, sin, cos, tan (en radianes). pi y e son constantes. Las variables se detectan solas.' }),
+      f.text('formula', { label: 'Fórmula', placeholder: 'gamma = x1 / (x1 - x2)', help: 'Potencia con ^ o **; exp, ln o log, log10, sqrt, sin, cos, tan (en radianes). pi y e son constantes. Las variables se detectan solas; c1, c2, c3… son constantes sin valor.' }),
       row(f.confidence(), f.text('unit', { label: 'Unidad del resultado', placeholder: 'g cm²' })),
+      f.text('constants', { label: 'Otras constantes sin valor (opcional)', placeholder: 'L0, m_e', help: 'Nombres separados por coma. c1, c2, c3… ya son constantes sin agregarlas acá. No se les pide valor ni incertidumbre.' }),
+      constantsBox,
       variablesBox,
       covSection,
     ];
   },
   calc(s) {
     if (!s.formula.trim()) return null;
-    const compiled = compileFormula(s.formula);
+    const compiled = compileState(s);
     const names = compiled.variables;
     if (names.length === 0) throw new Error('La fórmula no tiene variables.');
     const inputs = [];
@@ -193,6 +338,8 @@ export default {
       covariances.push({ a, b, value: covariance(x.values, y.values) / x.n, sxy: covariance(x.values, y.values), n: x.n });
       pairedWith.add(a).add(b);
     }));
+
+    if (compiled.constants.length) return withConstants(compiled, inputs, covariances, confidence, s.unit.trim());
 
     const r = propagate(compiled, inputs, covariances, confidence);
     const unit = s.unit.trim();
@@ -232,24 +379,7 @@ export default {
       nodes.push(note('warn', `No hay derivada simbólica para ${numericNames.join(', ')}: se calculó numéricamente.`));
     }
 
-    const inputMath = inputs.map((input) => {
-      const name = symbolTex(input.name);
-      if (input.values) {
-        const lines = [
-          `\\bar{${name}} = ${num(input.value)}, \\quad s = ${num(input.s)}, \\quad N = ${input.n}`,
-          `s_{\\bar{${name}}} = \\dfrac{s}{\\sqrt{N}} = \\dfrac{${num(input.s)}}{\\sqrt{${input.n}}} = ${num(input.sem)}`,
-        ];
-        if (input.ub > 0) {
-          lines.push(`u(${name}) = \\sqrt{s_{\\bar{${name}}}^{2} + u_B^{2}} = \\sqrt{${br(input.sem)}^{2} + ${br(input.ub)}^{2}} = ${num(input.u)}`);
-          lines.push(`\\nu_{${name}} = (N-1) \\left(\\dfrac{u}{s_{\\bar{${name}}}}\\right)^{4} = ${num(input.nu)}`);
-        } else {
-          lines.push(`u(${name}) = ${num(input.u)}, \\quad \\nu_{${name}} = N - 1 = ${num(input.nu)}`);
-        }
-        return lines;
-      }
-      if (input.u === 0) return [`${name} = ${num(input.value)} \\ \\text{(sin incertidumbre)}`];
-      return [`${name} = ${num(input.value)}, \\quad u(${name}) = ${num(input.u)}, \\quad \\nu_{${name}} = ${num(input.nu)}`];
-    }).flat();
+    const inputMath = inputLines(inputs);
 
     const covarianceStep = covariances.length > 0 && {
       title: 'Covarianzas',
